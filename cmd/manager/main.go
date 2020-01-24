@@ -24,13 +24,16 @@ import (
 	"github.com/openshift/machine-api-operator/pkg/controller/machine"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/klog"
+	"k8s.io/klog/klogr"
 	machineactuator "sigs.k8s.io/cluster-api-provider-aws/pkg/actuators/machine"
+	machinesetcontroller "sigs.k8s.io/cluster-api-provider-aws/pkg/actuators/machineset"
 	"sigs.k8s.io/cluster-api-provider-aws/pkg/apis/awsproviderconfig/v1beta1"
 	awsclient "sigs.k8s.io/cluster-api-provider-aws/pkg/client"
 	"sigs.k8s.io/cluster-api-provider-aws/pkg/version"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
 )
 
 func main() {
@@ -92,8 +95,17 @@ func main() {
 		glog.Fatalf("Error adding actuator: %v", err)
 	}
 
+	ctrl.SetLogger(klogr.New())
+	setupLog := ctrl.Log.WithName("setup")
+	if err = (&machinesetcontroller.MachineSetReconciler{
+		Client: mgr.GetClient(),
+		Log:    ctrl.Log.WithName("controllers").WithName("MachineSet"),
+	}).SetupWithManager(mgr, controller.Options{}); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MachineSet")
+		os.Exit(1)
+	}
 	// Start the Cmd
-	err = mgr.Start(signals.SetupSignalHandler())
+	err = mgr.Start(ctrl.SetupSignalHandler())
 	if err != nil {
 		glog.Fatalf("Error starting manager: %v", err)
 	}
