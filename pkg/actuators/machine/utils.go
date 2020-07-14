@@ -17,6 +17,7 @@ limitations under the License.
 package machine
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
 	"strings"
@@ -355,4 +356,24 @@ func getClusterID(machine *machinev1.Machine) (string, bool) {
 		clusterID, ok = machine.Labels[upstreamMachineClusterIDLabel]
 	}
 	return clusterID, ok
+}
+
+// GetConsoleOutput returns the latest console output of an instance
+func getConsoleOutput(awsClient awsclient.Client, instanceID string) (string, error) {
+	input := &ec2.GetConsoleOutputInput{
+		InstanceId: aws.String(instanceID),
+		//Latest:     aws.Bool(true),
+	}
+
+	out, err := awsClient.GetConsoleOutput(input)
+	if err != nil {
+		return "", fmt.Errorf("failed to get console output for instance %q: %v", instanceID, err)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(aws.StringValue(out.Output))
+	if err != nil {
+		return "", fmt.Errorf("failed to decode console output for instance %q: %v", instanceID, err)
+	}
+
+	return string(data), nil
 }

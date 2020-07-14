@@ -226,7 +226,16 @@ func (r *Reconciler) exists() (bool, error) {
 		return false, nil
 	}
 
-	return existingInstances[0] != nil, err
+	if existingInstances[0] != nil {
+		consoleLogs, err := getConsoleOutput(r.awsClient, *existingInstances[0].InstanceId)
+		if err == nil {
+			klog.V(3).Infof("AWS Console logs: %v", consoleLogs)
+		}
+		klog.V(3).Infof("OUT: %v", err)
+		return true, nil
+	}
+
+	return false, err
 }
 
 // isMaster returns true if the machine is part of a cluster's control plane
