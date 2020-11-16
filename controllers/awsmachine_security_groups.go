@@ -52,6 +52,7 @@ func (r *AWSMachineReconciler) ensureSecurityGroups(ec2svc service.EC2MachineInt
 	if !changed {
 		return false, nil
 	}
+	//TODO (alberto): securityGroupsChanged is broken looking at ID of additionalSec
 
 	if err := ec2svc.UpdateInstanceSecurityGroups(*scope.GetInstanceID(), ids); err != nil {
 		return false, err

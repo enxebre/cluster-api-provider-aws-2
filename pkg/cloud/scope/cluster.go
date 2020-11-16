@@ -57,7 +57,7 @@ func NewClusterScope(params ClusterScopeParams) (*ClusterScope, error) {
 		params.Logger = klogr.New()
 	}
 
-	session, err := sessionForRegion(params.AWSCluster.Spec.Region, params.Endpoints)
+	session, err := sessionForRegion("us-east-2", params.Endpoints)
 	if err != nil {
 		return nil, errors.Errorf("failed to create aws session: %v", err)
 	}
