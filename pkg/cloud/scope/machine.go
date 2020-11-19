@@ -337,3 +337,7 @@ func (m *MachineScope) AWSMachineIsDeleted() bool {
 func (m *MachineScope) IsEKSManaged() bool {
 	return m.InfraCluster.InfraCluster().GetObjectKind().GroupVersionKind().Kind == "AWSManagedControlPlane"
 }
+
+func (m *MachineScope) IsGuestCluster() bool {
+	return m.InfraCluster.InfraCluster().GetObjectKind().GroupVersionKind().Kind == "GuestCluster"
+}

@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 
 	"github.com/go-logr/logr"
@@ -26,7 +27,18 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/pointer"
+	infrav1 "sigs.k8s.io/cluster-api-provider-aws/api/v1alpha3"
+	ekscontrolplanev1 "sigs.k8s.io/cluster-api-provider-aws/controlplane/eks/api/v1alpha3"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/scope"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/ec2"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/elb"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/secretsmanager"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/ssm"
+	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/userdata"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
+	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	capierrors "sigs.k8s.io/cluster-api/errors"
 	"sigs.k8s.io/cluster-api/util"
@@ -39,17 +51,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-
-	infrav1 "sigs.k8s.io/cluster-api-provider-aws/api/v1alpha3"
-	ekscontrolplanev1 "sigs.k8s.io/cluster-api-provider-aws/controlplane/eks/api/v1alpha3"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/scope"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/ec2"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/elb"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/secretsmanager"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/ssm"
-	"sigs.k8s.io/cluster-api-provider-aws/pkg/cloud/services/userdata"
 )
 
 // AWSMachineReconciler reconciles a AwsMachine object
@@ -190,7 +191,10 @@ func (r *AWSMachineReconciler) Reconcile(req ctrl.Request) (_ ctrl.Result, reter
 
 		return r.reconcileNormal(ctx, machineScope, infraScope, infraScope, infraScope)
 	default:
-		return ctrl.Result{}, errors.New("infraCluster has unknown type")
+		if !awsMachine.ObjectMeta.DeletionTimestamp.IsZero() {
+			return r.reconcileDelete(machineScope, infraScope, infraScope, nil)
+		}
+		return r.reconcileNormal(ctx, machineScope, infraScope, infraScope, nil)
 	}
 }
 
@@ -553,16 +557,18 @@ func (r *AWSMachineReconciler) reconcileNormal(_ context.Context, machineScope *
 	if machineScope.InstanceIsOperational() {
 		machineScope.SetAddresses(instance.Addresses)
 
-		existingSecurityGroups, err := ec2svc.GetInstanceSecurityGroups(*machineScope.GetInstanceID())
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		if !machineScope.IsGuestCluster() {
+			existingSecurityGroups, err := ec2svc.GetInstanceSecurityGroups(*machineScope.GetInstanceID())
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 
-		// Ensure that the security groups are correct.
-		_, err = r.ensureSecurityGroups(ec2svc, machineScope, machineScope.AWSMachine.Spec.AdditionalSecurityGroups, existingSecurityGroups)
-		if err != nil {
-			conditions.MarkFalse(machineScope.AWSMachine, infrav1.SecurityGroupsReadyCondition, infrav1.SecurityGroupsFailedReason, clusterv1.ConditionSeverityError, err.Error())
-			return ctrl.Result{}, errors.Errorf("failed to apply security groups: %+v", err)
+			// Ensure that the security groups are correct.
+			_, err = r.ensureSecurityGroups(ec2svc, machineScope, machineScope.AWSMachine.Spec.AdditionalSecurityGroups, existingSecurityGroups)
+			if err != nil {
+				conditions.MarkFalse(machineScope.AWSMachine, infrav1.SecurityGroupsReadyCondition, infrav1.SecurityGroupsFailedReason, clusterv1.ConditionSeverityError, err.Error())
+				return ctrl.Result{}, errors.Errorf("failed to apply security groups: %+v", err)
+			}
 		}
 		conditions.MarkTrue(machineScope.AWSMachine, infrav1.SecurityGroupsReadyCondition)
 	}
@@ -791,6 +797,29 @@ func (r *AWSMachineReconciler) getInfraCluster(ctx context.Context, log logr.Log
 		}
 
 		return managedControlPlaneScope, nil
+	}
+
+	if cluster.Spec.ControlPlaneRef != nil &&
+		cluster.Spec.ControlPlaneRef.Kind != "AWSManagedControlPlane" &&
+		cluster.Spec.ControlPlaneRef.Kind != "AWSCluster" {
+		guestCluster, err := external.Get(ctx, r.Client, cluster.Spec.InfrastructureRef, cluster.Spec.InfrastructureRef.Namespace)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching guestCluster: %w", err)
+		}
+
+		// Create the cluster scope
+		guestClusterScope, err := scope.NewGuestClusterScope(scope.GuestClusterScopeParams{
+			Client:         r.Client,
+			Logger:         log,
+			Cluster:        cluster,
+			GuestCluster:   guestCluster,
+			ControllerName: "guestCluster",
+		})
+		if err != nil {
+			return nil, err
+		}
+		r.Log.Info("Using guestCluster")
+		return guestClusterScope, nil
 	}
 
 	awsCluster := &infrav1.AWSCluster{}
